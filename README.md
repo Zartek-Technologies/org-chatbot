@@ -22,7 +22,7 @@ A Streamlit-based chatbot that can query both structured databases (PostgreSQL) 
 
 1.  **Clone the repository** (if not already done):
     ```bash
-    git clone <repository-url>
+    git clone https://github.com/alfik-z/org-chatbot.git
     cd org-chatbot
     ```
 
@@ -85,3 +85,4 @@ A Streamlit-based chatbot that can query both structured databases (PostgreSQL) 
 - `pandas_executor.py`: Securely executes generated Pandas code for Excel analysis.
 - `hybrid_engine.py`: Orchestrates logic between SQL and Document engines.
 - `router.py`: Determines user intent (SQL vs Doc vs Hybrid).
+

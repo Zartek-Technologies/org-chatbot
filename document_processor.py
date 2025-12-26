@@ -7,6 +7,10 @@ from typing import List, Dict
 import PyPDF2
 from io import BytesIO
 from pandas_executor import PandasCodeExecutor
+from llama_index.core.retrievers import VectorIndexRetriever
+from llama_index.core.query_engine import RetrieverQueryEngine
+
+
 
 
 class DocumentProcessor:
@@ -14,8 +18,8 @@ class DocumentProcessor:
         self.embed_model = embed_model
         self.llm = llm
         self.node_parser = SimpleNodeParser.from_defaults(
-            chunk_size=512,
-            chunk_overlap=50
+            chunk_size=1024,     
+    chunk_overlap=200    
         )
         self.pandas_engines = {}
         self.vector_indexes = {}
@@ -279,6 +283,32 @@ class DocumentProcessor:
             except Exception as e:
                 print(f"⚠️ PandasQueryEngine error: {str(e)}")
                 return self._fallback_query(query, session_id)
+        
+        elif file_type in ["pdf", "image"]:
+            index = self.vector_indexes.get(session_id)
+            if not index:
+                return "Document index not found."
+            
+            try:
+                
+                # ✅ Use hybrid retriever with higher top-k
+                retriever = VectorIndexRetriever(
+                    index=index,
+                    similarity_top_k=10  # ← Get more candidates
+                )
+                
+                query_engine = RetrieverQueryEngine.from_args(
+                    retriever=retriever,
+                    llm=self.llm,
+                    response_mode="compact"  # ← Better for factual extraction
+                )
+                
+                response = query_engine.query(query)
+                return str(response)
+                
+            except Exception as e:
+                print(f"⚠️ Vector query error: {str(e)}")
+                return f"Error querying document: {str(e)}"
 
     
     def _fallback_query(self, query: str, session_id: str) -> str:

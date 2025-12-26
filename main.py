@@ -33,40 +33,63 @@ def init_system():
     llm = Groq(
         model="openai/gpt-oss-120b",
         api_key=os.getenv("GROQ_API_KEY"),
-        temperature=0.1,  # ← Deterministic code generation
+        temperature=0.1,
         max_tokens=1024
     )
     Settings.llm = llm
     
     embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
     
-    # Database
-    engine = create_engine(
-        f"postgresql+psycopg2://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}@{os.getenv('POSTGRES_HOST')}:{os.getenv('POSTGRES_PORT')}/{os.getenv('POSTGRES_DATABASE')}"
-    )
+    # Optional Database Connection
+    sql_engine = None
+    db_enabled = False
     
-    sql_database = SQLDatabase(
-        engine,
-        include_tables=["receivables_aging"],
-        sample_rows_in_table_info=0
-    )
+    try:
+        # Check if all required DB env vars are present
+        db_user = os.getenv('POSTGRES_USER')
+        db_password = os.getenv('POSTGRES_PASSWORD')
+        db_host = os.getenv('POSTGRES_HOST')
+        db_port = os.getenv('POSTGRES_PORT', '5432')
+        db_name = os.getenv('POSTGRES_DATABASE')
+        
+        if all([db_user, db_password, db_host, db_name]):
+            engine = create_engine(
+                f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+            )
+            
+            # Test connection
+            engine.connect()
+            
+            sql_database = SQLDatabase(
+                engine,
+                include_tables=["receivables_aging"],
+                sample_rows_in_table_info=0
+            )
+            
+            sql_engine = NLSQLTableQueryEngine(
+                sql_database=sql_database,
+                tables=["receivables_aging"],
+                llm=llm,
+                embed_model=embed_model
+            )
+            
+            db_enabled = True
+            st.toast("✅ Database connected successfully!")
+        else:
+            st.info("ℹ️ Database not configured. Running in document-only mode.")
     
-    sql_engine = NLSQLTableQueryEngine(
-        sql_database=sql_database,
-        tables=["receivables_aging"],
-        llm=llm,
-        embed_model=embed_model
-    )
+    except Exception as e:
+        st.warning(f"⚠️ Database connection failed: {str(e)}\nRunning in document-only mode.")
     
     doc_processor = DocumentProcessor(embed_model, llm)
     router = QueryRouter(llm)
     hybrid_engine = HybridQueryEngine(sql_engine, doc_processor, llm, router)
     
-    return hybrid_engine, doc_processor, llm
+    return hybrid_engine, doc_processor, llm, db_enabled
 
-hybrid_engine, doc_processor, llm = init_system()
+hybrid_engine, doc_processor, llm, db_enabled = init_system()
 
-# UI Layout (rest of your code unchanged)
+# UI Layout
 st.title("🤖 Enterprise Multi-Source Chatbot")
 st.markdown("Query databases, uploaded documents, or both!")
 
@@ -83,7 +106,6 @@ with st.sidebar:
     if uploaded_file and uploaded_file not in st.session_state.uploaded_files:
         with st.spinner(f"Processing {uploaded_file.name}..."):
             try:
-                # Process based on file type
                 file_extension = uploaded_file.name.lower()
                 
                 if file_extension.endswith(('.xlsx', '.xls')):
@@ -94,7 +116,7 @@ with st.sidebar:
                     doc_processor.process_pdf(uploaded_file, st.session_state.session_id)
                     st.success(f"✅ Processed PDF: {uploaded_file.name}")
                     
-                else:  # Image
+                else:
                     doc_processor.process_image(uploaded_file, st.session_state.session_id)
                     st.success(f"✅ Processed Image: {uploaded_file.name}")
                 
@@ -106,41 +128,49 @@ with st.sidebar:
                     import traceback
                     st.code(traceback.format_exc())
     
-    # Show uploaded files
     if st.session_state.uploaded_files:
         st.subheader("📄 Uploaded Files")
         for file in st.session_state.uploaded_files:
             st.text(f"✓ {file.name}")
     
-    # Query source selector
     st.divider()
     st.header("🎯 Query Source")
     
+    # Adjust options based on DB availability
+    if db_enabled:
+        query_options = ["Auto (Smart Routing)", "Uploaded Documents Only", "Database Only", "Both"]
+    else:
+        query_options = ["Uploaded Documents Only"]
+        st.caption("⚠️ Database mode unavailable")
+    
     query_source = st.radio(
         "Choose data source:",
-        ["Auto (Smart Routing)", "Uploaded Documents Only", "Database Only", "Both"],
+        query_options,
         index=0,
-        help="Auto: Automatically detects which source to use"
+        help="Auto: Automatically detects which source to use" if db_enabled else "Database not configured"
     )
     
-    # Example queries
     st.divider()
     st.header("💡 Example Queries")
     
-    examples = {
-        "Database": [
+    examples = {}
+    
+    if db_enabled:
+        examples["Database"] = [
             "Total receivables pending?",
             "Receivables aging > 360 days?"
-        ],
-        "Documents": [
-            "Summarize the uploaded Excel",
-            "Show attendance for sreejith",
-            "What's in the sheet?"
-        ],
-        "Hybrid": [
+        ]
+    
+    examples["Documents"] = [
+        "Summarize the uploaded Excel",
+        "Show attendance for sreejith",
+        "What's in the sheet?"
+    ]
+    
+    if db_enabled:
+        examples["Hybrid"] = [
             "Compare uploaded data with database"
         ]
-    }
     
     for category, queries in examples.items():
         st.subheader(category)
@@ -168,32 +198,37 @@ if prompt := st.chat_input("Ask anything..."):
             try:
                 has_docs = len(st.session_state.uploaded_files) > 0
                 
-                # Override routing based on user choice
-                if query_source == "Uploaded Documents Only":
-                    if not has_docs:
-                        response = "❌ No documents uploaded yet. Please upload a file first."
-                    else:
-                        response = "📄 **Querying Uploaded Documents...**\n\n"
-                        doc_result = doc_processor.query_documents(prompt, st.session_state.session_id)
-                        response += str(doc_result)
-                
-                elif query_source == "Database Only":
-                    response = "🗄️ **Querying Database...**\n\n"
-                    db_result = hybrid_engine._query_sql(prompt)
-                    response += str(db_result)
-                
-                elif query_source == "Both":
-                    if not has_docs:
-                        response = "❌ No documents uploaded. Querying database only...\n\n"
-                        response += str(hybrid_engine._query_sql(prompt))
-                    else:
-                        response = hybrid_engine._query_hybrid(prompt, st.session_state.session_id)
-                
-                else:  # Auto routing
-                    response = hybrid_engine.query(prompt, st.session_state.session_id, has_docs)
-                
-                st.markdown(response)
-                st.session_state.messages.append({"role": "assistant", "content": response})
+                # Check if database query is requested but DB is disabled
+                if not db_enabled and query_source in ["Database Only", "Both"]:
+                    response = "❌ Database is not configured. Please upload documents or configure database credentials in secrets."
+                    st.markdown(response)
+                    st.session_state.messages.append({"role": "assistant", "content": response})
+                else:
+                    if query_source == "Uploaded Documents Only":
+                        if not has_docs:
+                            response = "❌ No documents uploaded yet. Please upload a file first."
+                        else:
+                            response = "📄 **Querying Uploaded Documents...**\n\n"
+                            doc_result = doc_processor.query_documents(prompt, st.session_state.session_id)
+                            response += str(doc_result)
+                    
+                    elif query_source == "Database Only":
+                        response = "🗄️ **Querying Database...**\n\n"
+                        db_result = hybrid_engine._query_sql(prompt)
+                        response += str(db_result)
+                    
+                    elif query_source == "Both":
+                        if not has_docs:
+                            response = "❌ No documents uploaded. Querying database only...\n\n"
+                            response += str(hybrid_engine._query_sql(prompt))
+                        else:
+                            response = hybrid_engine._query_hybrid(prompt, st.session_state.session_id)
+                    
+                    else:  # Auto routing
+                        response = hybrid_engine.query(prompt, st.session_state.session_id, has_docs)
+                    
+                    st.markdown(response)
+                    st.session_state.messages.append({"role": "assistant", "content": response})
                 
             except Exception as e:
                 error_msg = f"❌ Error: {str(e)}"

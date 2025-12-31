@@ -19,26 +19,21 @@ class QueryRouter:
         """Determine query routing based on content and context"""
         query_lower = query.lower()
         
-        # If no documents uploaded, must use SQL
-        if not has_uploaded_docs:
-            return QueryType.SQL_ONLY
-        
-        # Count keyword matches
-        doc_score = sum(1 for kw in self.keywords_doc if kw in query_lower)
-        sql_score = sum(1 for kw in self.keywords_sql if kw in query_lower)
-        
-        # Priority rules:
-        # 1. Document keywords take precedence
-        if doc_score > 0:
+        # ✅ NEW: If files uploaded, ALWAYS check them first
+        if has_uploaded_docs:
+            # Check for explicit pre-loaded sheet queries
+            preloaded_keywords = [
+                "sales target", "monthly sales", "january", "february", 
+                "service throughput", "customer satisfaction", "receivables",
+                "debtors", "skyline", "otc", "insurance"
+            ]
+            
+            # If query mentions pre-loaded sheets, use those
+            if any(kw in query_lower for kw in preloaded_keywords):
+                return QueryType.SQL_ONLY  # Actually means "pre-loaded sheets"
+            
+            # Otherwise, query uploaded document
             return QueryType.DOCUMENT_ONLY
         
-        # 2. SQL keywords without doc keywords
-        if sql_score > 0:
-            return QueryType.SQL_ONLY
-        
-        # 3. Check for comparison/hybrid queries
-        if any(word in query_lower for word in ["compare", "difference", "match", "versus", "vs"]):
-            return QueryType.HYBRID
-        
-        # 4. Default: If documents exist, search them first
-        return QueryType.DOCUMENT_ONLY
+        # No uploaded docs - use pre-loaded sheets
+        return QueryType.SQL_ONLY

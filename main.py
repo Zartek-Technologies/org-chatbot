@@ -1,3 +1,4 @@
+# main.py
 import os
 import streamlit as st
 from dotenv import load_dotenv
@@ -8,7 +9,8 @@ from llama_index.llms.groq import Groq
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 import uuid
 
-from router import QueryRouter, QueryType
+# ✅ NEW IMPORTS
+from intelligent_sheet_router import IntelligentSheetRouter, UserRole
 from document_processor import DocumentProcessor
 from hybrid_engine import HybridQueryEngine
 
@@ -27,11 +29,15 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "uploaded_files" not in st.session_state:
     st.session_state.uploaded_files = []
+# ✅ NEW: Store user role
+if "user_role" not in st.session_state:
+    st.session_state.user_role = UserRole.CEO  # Default to CEO, change based on login
+
 
 @st.cache_resource
 def init_system():
     llm = Groq(
-        model="openai/gpt-oss-120b",
+        model="llama-3.3-70b-versatile",
         api_key=os.getenv("GROQ_API_KEY"),
         temperature=0.1,
         max_tokens=1024
@@ -45,7 +51,6 @@ def init_system():
     db_enabled = False
     
     try:
-        # Check if all required DB env vars are present
         db_user = os.getenv('POSTGRES_USER')
         db_password = os.getenv('POSTGRES_PASSWORD')
         db_host = os.getenv('POSTGRES_HOST')
@@ -57,7 +62,6 @@ def init_system():
                 f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
             )
             
-            # Test connection
             engine.connect()
             
             sql_database = SQLDatabase(
@@ -81,25 +85,33 @@ def init_system():
     except Exception as e:
         st.warning(f"⚠️ Database connection failed: {str(e)}\nRunning in document-only mode.")
     
-    doc_processor = DocumentProcessor(embed_model, llm)
-    router = QueryRouter(llm)
+    # ✅ NEW: Pass user role to document processor
+    user_role = st.session_state.user_role
+    doc_processor = DocumentProcessor(embed_model, llm, user_role=user_role)
+    
+    router = IntelligentSheetRouter(llm, user_role=user_role)
     hybrid_engine = HybridQueryEngine(sql_engine, doc_processor, llm, router)
     
     return hybrid_engine, doc_processor, llm, db_enabled
+
 
 hybrid_engine, doc_processor, llm, db_enabled = init_system()
 
 # UI Layout
 st.title("🤖 Enterprise Multi-Source Chatbot")
-st.markdown("Query databases, uploaded documents, or both!")
+st.markdown("Query databases, uploaded documents, or pre-loaded sheets!")
 
-# Sidebar for file uploads
+# ✅ NEW: Show current user role
+st.sidebar.info(f"👤 **User Role:** {st.session_state.user_role.value}")
+
+# Sidebar for file uploads (PDFs only now - Excel sheets are pre-loaded)
 with st.sidebar:
-    st.header("📁 Upload Documents")
+    st.header("📄 Upload Additional Documents")
+    st.caption("Excel sheets are pre-loaded. Upload PDFs for additional context.")
     
     uploaded_file = st.file_uploader(
-        "Upload Excel, PDF, or Image",
-        type=["xlsx", "xls", "pdf", "png", "jpg", "jpeg"],
+        "Upload PDF or Image (optional)",
+        type=["pdf", "png", "jpg", "jpeg"],
         key="file_uploader"
     )
     
@@ -108,16 +120,34 @@ with st.sidebar:
             try:
                 file_extension = uploaded_file.name.lower()
                 
-                if file_extension.endswith(('.xlsx', '.xls')):
-                    doc_processor.process_excel(uploaded_file, st.session_state.session_id)
-                    st.success(f"✅ Processed Excel: {uploaded_file.name}")
-                    
-                elif file_extension.endswith('.pdf'):
-                    doc_processor.process_pdf(uploaded_file, st.session_state.session_id)
+                if file_extension.endswith('.pdf'):
+                    # ✅ Process PDF
+                    doc_processor.process_pdf(
+                        uploaded_file, 
+                        st.session_state.session_id
+                    )
                     st.success(f"✅ Processed PDF: {uploaded_file.name}")
                     
+                    # ✅ NEW: Verify it's queryable
+                    if st.session_state.session_id in doc_processor.vector_indexes:
+                        st.info("📄 PDF is now queryable! Ask questions about it.")
+                    
+                elif file_extension.endswith(('.xlsx', '.xls')):
+                    # ✅ Process uploaded Excel
+                    doc_processor.process_excel(
+                        uploaded_file,
+                        session_id=f"uploaded_{st.session_state.session_id}",
+                        sheet_id=None,
+                        metadata=None
+                    )
+                    st.success(f"✅ Processed Excel: {uploaded_file.name}")
+                    
                 else:
-                    doc_processor.process_image(uploaded_file, st.session_state.session_id)
+                    # ✅ Process image
+                    doc_processor.process_image(
+                        uploaded_file, 
+                        st.session_state.session_id
+                    )
                     st.success(f"✅ Processed Image: {uploaded_file.name}")
                 
                 st.session_state.uploaded_files.append(uploaded_file)
@@ -127,50 +157,48 @@ with st.sidebar:
                 with st.expander("Show error details"):
                     import traceback
                     st.code(traceback.format_exc())
+
     
     if st.session_state.uploaded_files:
-        st.subheader("📄 Uploaded Files")
+        st.subheader("📁 Uploaded Files")
         for file in st.session_state.uploaded_files:
             st.text(f"✓ {file.name}")
     
     st.divider()
-    st.header("🎯 Query Source")
     
-    # Adjust options based on DB availability
-    if db_enabled:
-        query_options = ["Auto (Smart Routing)", "Uploaded Documents Only", "Database Only", "Both"]
-    else:
-        query_options = ["Uploaded Documents Only"]
-        st.caption("⚠️ Database mode unavailable")
+    # ✅ NEW: Show pre-loaded sheets
+    st.header("📊 Pre-Loaded Data Sources")
+    st.caption("These sheets are always available (based on your role):")
     
-    query_source = st.radio(
-        "Choose data source:",
-        query_options,
-        index=0,
-        help="Auto: Automatically detects which source to use" if db_enabled else "Database not configured"
-    )
+    from sheet_registry import get_available_sheets
+    available_sheets = [s for s in get_available_sheets() 
+                       if s.sheet_id in doc_processor.router.allowed_sheets]
+    
+    if available_sheets:
+        for sheet in available_sheets[:5]:  # Show first 5
+            st.text(f"{sheet.icon} {sheet.name}")
+        if len(available_sheets) > 5:
+            st.caption(f"... and {len(available_sheets)-5} more")
     
     st.divider()
     st.header("💡 Example Queries")
     
-    examples = {}
-    
-    if db_enabled:
-        examples["Database"] = [
-            "Total receivables pending?",
-            "Receivables aging > 360 days?"
+    examples = {
+        "Sales": [
+            "What is the sales target achievement?",
+            "Show January sales by consultant",
+        ],
+        "Service": [
+            "How many service requests pending?",
+        ],
+        "Finance": [
+            "Receivables aging analysis",
+            "Show debtors older than 90 days",
+        ],
+        "Demo": [
+            "Demo vehicle inventory status",
         ]
-    
-    examples["Documents"] = [
-        "Summarize the uploaded Excel",
-        "Show attendance for sreejith",
-        "What's in the sheet?"
-    ]
-    
-    if db_enabled:
-        examples["Hybrid"] = [
-            "Compare uploaded data with database"
-        ]
+    }
     
     for category, queries in examples.items():
         st.subheader(category)
@@ -196,39 +224,52 @@ if prompt := st.chat_input("Ask anything..."):
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
             try:
-                has_docs = len(st.session_state.uploaded_files) > 0
+                has_uploaded = len(st.session_state.uploaded_files) > 0
                 
-                # Check if database query is requested but DB is disabled
-                if not db_enabled and query_source in ["Database Only", "Both"]:
-                    response = "❌ Database is not configured. Please upload documents or configure database credentials in secrets."
-                    st.markdown(response)
-                    st.session_state.messages.append({"role": "assistant", "content": response})
+                # ✅ STEP 1: Check if query is about uploaded file
+                if has_uploaded:
+                    # Keywords that indicate uploaded file
+                    uploaded_keywords = [
+                        "uploaded", "this file", "this document", 
+                        "performance", "product deck", "annexure"
+                    ]
+                    
+                    query_lower = prompt.lower()
+                    is_uploaded_query = any(kw in query_lower for kw in uploaded_keywords)
+                    
+                    # Or if query is generic and file was just uploaded
+                    recent_upload = (
+                        len(st.session_state.messages) < 2 and 
+                        has_uploaded
+                    )
+                    
+                    if is_uploaded_query or recent_upload:
+                        # Query uploaded file
+                        if st.session_state.session_id in doc_processor.vector_indexes:
+                            response = doc_processor._query_vector_index(
+                                prompt,
+                                st.session_state.session_id
+                            )
+                        else:
+                            response = "❌ No uploaded document found. Please upload a file first."
+                    else:
+                        # Query pre-loaded sheets
+                        response = doc_processor.query_documents(
+                            prompt, 
+                            st.session_state.session_id
+                        )
                 else:
-                    if query_source == "Uploaded Documents Only":
-                        if not has_docs:
-                            response = "❌ No documents uploaded yet. Please upload a file first."
-                        else:
-                            response = "📄 **Querying Uploaded Documents...**\n\n"
-                            doc_result = doc_processor.query_documents(prompt, st.session_state.session_id)
-                            response += str(doc_result)
-                    
-                    elif query_source == "Database Only":
-                        response = "🗄️ **Querying Database...**\n\n"
-                        db_result = hybrid_engine._query_sql(prompt)
-                        response += str(db_result)
-                    
-                    elif query_source == "Both":
-                        if not has_docs:
-                            response = "❌ No documents uploaded. Querying database only...\n\n"
-                            response += str(hybrid_engine._query_sql(prompt))
-                        else:
-                            response = hybrid_engine._query_hybrid(prompt, st.session_state.session_id)
-                    
-                    else:  # Auto routing
-                        response = hybrid_engine.query(prompt, st.session_state.session_id, has_docs)
-                    
-                    st.markdown(response)
-                    st.session_state.messages.append({"role": "assistant", "content": response})
+                    # No uploaded files - query pre-loaded sheets
+                    response = doc_processor.query_documents(
+                        prompt, 
+                        st.session_state.session_id
+                    )
+                
+                st.markdown(response)
+                st.session_state.messages.append({
+                    "role": "assistant", 
+                    "content": response
+                })
                 
             except Exception as e:
                 error_msg = f"❌ Error: {str(e)}"
@@ -236,4 +277,7 @@ if prompt := st.chat_input("Ask anything..."):
                 with st.expander("Show error details"):
                     import traceback
                     st.code(traceback.format_exc())
-                st.session_state.messages.append({"role": "assistant", "content": error_msg})
+                st.session_state.messages.append({
+                    "role": "assistant", 
+                    "content": error_msg
+                })
